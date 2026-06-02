@@ -349,8 +349,13 @@ uint32_t ACAN2517FD::begin (const ACAN2517FDSettings & inSettings,
       }
     }
   }
-//----------------------------------- Set full speed clock
-  mSPISettings = SPISettings ((inSettings.sysClock () * 2) / 5, MSBFIRST, SPI_MODE0) ;
+//----------------------------------- Set full speed clock DT3
+#ifdef ARDUINO_AVR_MEGA2560
+  mSPISettings = SPISettings ((inSettings.sysClock () * 2) / 20, MSBFIRST, SPI_MODE0) ;
+#else 
+  mSPISettings = SPISettings((inSettings.sysClock() * 2) / 5, MSBFIRST, SPI_MODE0);
+#endif
+
 //----------------------------------- Checking SPI connection is on (with a full speed clock)
 //    We write and read back 2517 RAM at address 0x400
   for (uint32_t i=1 ; (i != 0) && (errorCode == 0) ; i <<= 1) {
@@ -1288,7 +1293,15 @@ uint32_t ACAN2517FD::diagInfos (const int inIndex) { // thanks to Flole998 and t
   return readRegister32 (inIndex ? BDIAG1_REGISTER: BDIAG0_REGISTER) ;
 }
 
-//------------------------------------------------------------------------------
+/// <summary>
+/// DT3 Verifica un registro conocido para diagnosticar si hay power
+/// </summary>
+/// <returns></returns>
+bool ACAN2517FD::diagPower() {
+
+    return readRegister32(OSC_REGISTER) > 0;
+}
+//······················································································································
 //    GPIO
 //------------------------------------------------------------------------------
 

@@ -100,6 +100,7 @@ class ACAN2517FD {
   // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
   public: uint32_t diagInfos (const int inIndex = 1) ;
+  public: bool diagPower(); //DT3
 
   // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   //    Operation Mode
@@ -129,7 +130,7 @@ class ACAN2517FD {
   #ifdef ARDUINO_ARCH_ESP32
     private: TaskHandle_t mESP32TaskHandle = nullptr ;
   #endif
-  private: SPISettings mSPISettings ;
+  public: SPISettings mSPISettings ;
   private: SPIClass & mSPI ;
   private: const uint8_t mCS ;
   private: const uint8_t mINT ;
@@ -237,6 +238,22 @@ class ACAN2517FD {
     }
     private: inline void deassertCS() {
       *(cs_pin_reg) |= cs_pin_mask;
+    }
+  #elif defined(ARDUINO_ARCH_RP2040)
+
+    private: inline void initCS() {
+        gpio_init(mCS);
+        gpio_set_dir(mCS, GPIO_OUT);
+    }
+    private: inline void assertCS() {
+       // *(cs_pin_reg) &= ~cs_pin_mask;
+        //digitalWrite(mCS, LOW);
+        gpio_put(mCS, LOW);
+    }
+    private: inline void deassertCS() {
+       // *(cs_pin_reg) |= cs_pin_mask;
+        //digitalWrite(mCS, HIGH);
+        gpio_put(mCS, HIGH);
     }
   #elif defined(__MK20DX128__) || defined(__MK20DX256__) || defined(__MK66FX1M0__) || defined(__MK64FX512__)
     private: volatile uint8_t *cs_pin_reg;
