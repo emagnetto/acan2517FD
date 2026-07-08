@@ -619,8 +619,20 @@ bool ACAN2517FD::tryToSend (const CANFDMessage & inMessage) {
 
 bool ACAN2517FD::enterInTransmitBuffer (const CANFDMessage & inMessage) {
   bool result ;
-  if (mHardwareTxFIFOFull) {
+  if (mHardwareTxFIFOFull || (mDriverTransmitBuffer.count () > 0)) {
     result = mDriverTransmitBuffer.append (inMessage) ;
+    if (result && !mHardwareTxFIFOFull) {
+      transmitInterrupt () ;
+    //--- If controller FIFO is full, enable "FIFO not full" interrupt
+      const uint8_t status = readRegister8Assume_SPI_transaction (FIFOSTA_REGISTER (TRANSMIT_FIFO_INDEX)) ;
+      if ((status & 1) == 0) { // FIFO is full
+        uint8_t data8 = 1 << 7 ;  // FIFO is a transmit FIFO
+        data8 |= 1 ; // Enable "FIFO not full" interrupt
+        data8 |= 1 << 4 ; // TXATIE ---> 1: Enable Transmit Attempts Exhausted Interrupt
+        writeRegister8Assume_SPI_transaction (FIFOCON_REGISTER (TRANSMIT_FIFO_INDEX), data8) ;
+        mHardwareTxFIFOFull = true ;
+      }
+    }
   }else{
     result = true ;
     appendInControllerTxFIFO (inMessage) ;
@@ -794,7 +806,17 @@ bool ACAN2517FD::available (void) {
 //------------------------------------------------------------------------------
 
 bool ACAN2517FD::receive (CANFDMessage & outMessage) {
+    #ifdef ARDUINO_ARCH_ESP32
+      taskDISABLE_INTERRUPTS () ;
+    #else
+      noInterrupts () ;
+    #endif
       const bool hasReceivedMessage = mDriverReceiveBuffer.remove (outMessage) ;
+    #ifdef ARDUINO_ARCH_ESP32
+      taskENABLE_INTERRUPTS () ;
+    #else
+      interrupts () ;
+    #endif
     //--- If receive interrupt is disabled, enable it (added in release 2.17)
       if (mINT == 255) { // No interrupt pin
         mRxInterruptEnabled = true ;
