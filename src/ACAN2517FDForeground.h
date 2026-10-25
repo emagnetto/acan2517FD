@@ -4,6 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Only the opt-in foreground path uses SRAM code placement. Native tests keep
+// ordinary functions; legacy ACAN entry points and their section layout are untouched.
+#if defined(ARDUINO_ARCH_RP2040) && defined(__GNUC__)
+#define ACAN_FOREGROUND_RAM(name) __attribute__((section(".time_critical.dt3_can_" #name), noinline))
+#else
+#define ACAN_FOREGROUND_RAM(name)
+#endif
+
 namespace acan2517fd {
 
 struct ForegroundFrame {
@@ -49,6 +57,13 @@ enum class ForegroundFault : uint8_t {
     Configuration
 };
 enum class ForegroundWork : uint8_t { None, Initialization, Receive, Transmit, Maintenance, Recovery };
+// Diagnostic IDs are stable across the bench unit-timing extension. One ready
+// state unit performs one SPI transaction or one queue-bookkeeping operation.
+enum class ForegroundUnit : uint8_t {
+    None, VectorStatus, RxAddress, RxObject, RxAdvance, RxPublish,
+    TxStatusAddress, TxPrepare, TxObject, TxAdvance, TxComplete,
+    Health, FaultClear, Initialization, Recovery
+};
 
 struct ForegroundCounters {
     uint32_t rxFrames = 0, rxBytes = 0, txFrames = 0, txBytes = 0;
@@ -67,7 +82,21 @@ class Foreground {
   public:
     Foreground(ForegroundIo &io, ForegroundFrame *rx, size_t rxCapacity, ForegroundFrame *tx, size_t txCapacity);
     bool begin(const ForegroundConfig &config, uint64_t nowUs);
-    ForegroundWork step(uint64_t nowUs, bool interruptLow);
+    ACAN_FOREGROUND_RAM(driver_step) ForegroundWork step(uint64_t nowUs, bool interruptLow);
+    // Pure owner-local readiness check: no SPI, allocation or clock reads.
+    // Backoff and healthy idle do not need repeated no-op driver calls.
+    ACAN_FOREGROUND_RAM(driver_hasWork) bool hasWork(uint64_t nowUs, bool interruptLow) const {
+        if (state_ == ForegroundState::Initializing) {
+            return true;
+        }
+        if (state_ == ForegroundState::Recovering) {
+            return stage_ < 3 || nowUs >= retryAt_;
+        }
+        return state_ == ForegroundState::Ready &&
+               (pending_ != Phase::Idle || interruptLow || txCount_ || healthPhase_ || nowUs - healthAt_ >= 10000);
+    }
+    ForegroundUnit lastUnit() const { return lastUnit_; }
+    bool inProgress() const { return pending_ != Phase::Idle; }
     bool receive(ForegroundFrame &frame);
     bool submit(const ForegroundFrame &frame, uint64_t nowUs);
     void requestRecovery(uint64_t nowUs);
@@ -101,9 +130,9 @@ class Foreground {
     }
     // Conservative transaction allowance. The outer deadline still measures
     // real elapsed time and reports a peripheral/framework operation overrun.
-    uint32_t nextStepBudgetUs() const {
+    ACAN_FOREGROUND_RAM(driver_nextStepBudgetUs) uint32_t nextStepBudgetUs() const {
         return (state_ == ForegroundState::Initializing && stage_ <= 5) ||
-                       (state_ == ForegroundState::Recovering && stage_ == 0)
+                       (state_ == ForegroundState::Recovering && stage_ < 3)
                    ? 130
                    : 70;
     }
@@ -118,14 +147,20 @@ class Foreground {
     }
 
   private:
+    enum class Phase : uint8_t {
+        Idle, RxAddress, RxObject, RxAdvance, RxPublish, TxStatus,
+        TxPrepare, TxObject, TxAdvance, TxComplete, FaultClear
+    };
+    ACAN_FOREGROUND_RAM(driver_progressTransfer) ForegroundWork progressTransfer(uint64_t nowUs);
+    void scheduleClear(uint16_t address, uint8_t value, ForegroundFault fault);
     bool initializeStep(uint64_t nowUs);
-    bool read32(uint16_t address, uint32_t &value);
+    ACAN_FOREGROUND_RAM(driver_read32) bool read32(uint16_t address, uint32_t &value);
     bool write32(uint16_t address, uint32_t value);
-    bool write8(uint16_t address, uint8_t value);
+    ACAN_FOREGROUND_RAM(driver_write8) bool write8(uint16_t address, uint8_t value);
     bool checkedWrite(uint16_t address, uint32_t value, uint8_t width);
     void startAttempt(uint64_t nowUs);
     void clearQueues();
-    void add(uint32_t &value, uint32_t amount = 1);
+    ACAN_FOREGROUND_RAM(driver_add) void add(uint32_t &value, uint32_t amount = 1);
     ForegroundIo &io_;
     ForegroundFrame *rx_, *tx_;
     size_t rxCapacity_, txCapacity_;
@@ -136,9 +171,17 @@ class Foreground {
     uint32_t generation_ = 0;
     uint32_t txProgress_ = 0;
     uint16_t stage_ = 0, index_ = 0;
-    uint8_t retry_ = 0, stuck_ = 0;
+    uint8_t retry_ = 0, stuck_ = 0, healthPhase_ = 0;
     uint32_t rxHead_ = 0, rxCount_ = 0, txHead_ = 0, txCount_ = 0;
     uint64_t attemptAt_ = 0, modeAt_ = 0, retryAt_ = 0, healthAt_ = 0, lastTxWaitUs_ = 0;
     bool preferTx_ = false;
+    Phase pending_ = Phase::Idle;
+    ForegroundUnit lastUnit_ = ForegroundUnit::None;
+    uint8_t pendingObject_[72]{};
+    uint32_t pendingUa_ = 0;
+    uint64_t pendingRxAtUs_ = 0;
+    uint16_t clearAddress_ = 0;
+    uint8_t clearValue_ = 0;
+    ForegroundFault clearFault_ = ForegroundFault::None;
 };
 } // namespace acan2517fd
