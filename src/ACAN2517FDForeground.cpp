@@ -75,7 +75,8 @@ bool Foreground::begin(const ForegroundConfig &config, uint64_t nowUs) {
     if (!rx_ || !tx_ || !config.softwareRx || !config.softwareTx || config.softwareRx > rxCapacity_ ||
         config.softwareTx > txCapacity_ || !config.hardwareRx || !config.hardwareTx || config.hardwareRx > 32 ||
         config.hardwareTx > 32 || controllerBytes(config.hardwareRx, config.hardwareTx) > 2048 ||
-        config.requestId > 0x7FF) {
+        config.requestId > 0x7FF ||
+        !validTimingProfile(config.timing)) {
         state_ = ForegroundState::Faulted;
         fault_ = ForegroundFault::Configuration;
         return false;
@@ -198,14 +199,23 @@ bool Foreground::initializeStep(uint64_t nowUs) {
             uint8_t width;
             uint32_t value;
         };
-        // Fixed 40 MHz / 500 kbit/s / 2 Mbit/s, 80% sample points. IOCON
-        // writes are single-byte. Preserve reset GPIO input/standby wiring.
+        // 40 MHz, BRP=1 and 80% sample points. Data TSEG1/2 is 15/4,
+        // 7/2 or 3/1 at 2/4/8 Mbit/s respectively; SJW=TSEG2.
+        // Auto TDC offset follows data TSEG1 (15, 7 or 3 clock ticks),
+        // matching the existing ACAN settings convention. Recovery reapplies
+        // this same bound configuration; it never changes bitrate itself.
+        const bool fastNominal = arbitrationHz(config_.timing) == 1000000;
+        const uint32_t dataRate = dataHz(config_.timing);
+        const uint32_t dataTiming = dataRate == 8000000 ? 0x00020000u
+                                    : dataRate == 4000000 ? 0x00060101u : 0x000E0303u;
+        const uint32_t tdc = dataRate == 8000000 ? 0x02020300u
+                             : dataRate == 4000000 ? 0x02020700u : 0x02020F00u;
         const Setting settings[] = {{0xE07, 1, 3},
                                     {Con, 1, 0x60},
                                     {Con + 2, 1, 1},
-                                    {Nbt, 4, 0x003E0F0F},
-                                    {Dbt, 4, 0x000E0303},
-                                    {Tdc, 4, 0x02020F00},
+                                    {Nbt, 4, fastNominal ? 0x001E0707u : 0x003E0F0Fu},
+                                    {Dbt, 4, dataTiming},
+                                    {Tdc, 4, tdc},
                                     {RxCon + 3, 1, uint32_t(0xE0 | (config_.hardwareRx - 1))},
                                     {RxCon, 1, 9},
                                     {TxCon + 3, 1, uint32_t(0xE0 | (config_.hardwareTx - 1))},

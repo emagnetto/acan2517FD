@@ -35,11 +35,29 @@ class ForegroundIo {
     virtual uint64_t timestampUs() const = 0;
 };
 
+// Fixed 40 MHz profiles for the opt-in foreground engine only. Legacy ACAN
+// settings/entry points do not use this type or change their defaults.
+enum class ForegroundTimingProfile : uint8_t { K500M2 = 0, K1000M4 = 1, K500M4 = 2, K1000M8 = 3 };
+
+constexpr bool validTimingProfile(ForegroundTimingProfile profile) {
+    return static_cast<uint8_t>(profile) <= 3;
+}
+
+constexpr uint32_t arbitrationHz(ForegroundTimingProfile profile) {
+    return profile == ForegroundTimingProfile::K1000M4 || profile == ForegroundTimingProfile::K1000M8
+               ? 1000000 : 500000;
+}
+constexpr uint32_t dataHz(ForegroundTimingProfile profile) {
+    return profile == ForegroundTimingProfile::K1000M8 ? 8000000
+           : profile == ForegroundTimingProfile::K500M2 ? 2000000 : 4000000;
+}
+
 struct ForegroundConfig {
     uint8_t hardwareRx = 24, hardwareTx = 4;
     uint8_t softwareRx = 32, softwareTx = 4;
     bool loopback = false;
     uint16_t requestId = 0x6E0;
+    ForegroundTimingProfile timing = ForegroundTimingProfile::K500M2;
 };
 
 enum class ForegroundState : uint8_t { Off, Initializing, Ready, Recovering, Faulted };
@@ -100,6 +118,9 @@ class Foreground {
     bool receive(ForegroundFrame &frame);
     bool submit(const ForegroundFrame &frame, uint64_t nowUs);
     void requestRecovery(uint64_t nowUs);
+    // Freeze an aborted diagnostic transition without issuing further SPI or
+    // resetting recovery attempts. A later explicit begin needs a new lease.
+    void suspend() { clearQueues(); state_ = ForegroundState::Off; }
     void fail(ForegroundFault fault, uint64_t nowUs);
     ForegroundState state() const {
         return state_;
