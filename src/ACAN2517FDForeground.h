@@ -57,6 +57,9 @@ struct ForegroundConfig {
     uint8_t softwareRx = 32, softwareTx = 4;
     bool loopback = false;
     uint16_t requestId = 0x6E0;
+    // Opt-in exact application filters. Ordinary/legacy configurations retain
+    // their existing single diagnostic filter and initialization sequence.
+    bool applicationFilters = false;
     ForegroundTimingProfile timing = ForegroundTimingProfile::K500M2;
 };
 
@@ -128,6 +131,7 @@ class Foreground {
     ForegroundFault fault() const {
         return fault_;
     }
+    bool hardwareDetected() const { return hardwareDetected_; }
     uint32_t generation() const {
         return generation_;
     }
@@ -196,6 +200,7 @@ class Foreground {
     uint32_t rxHead_ = 0, rxCount_ = 0, txHead_ = 0, txCount_ = 0;
     uint64_t attemptAt_ = 0, modeAt_ = 0, retryAt_ = 0, healthAt_ = 0, lastTxWaitUs_ = 0;
     bool preferTx_ = false;
+    bool hardwareDetected_ = false;
     Phase pending_ = Phase::Idle;
     ForegroundUnit lastUnit_ = ForegroundUnit::None;
     uint8_t pendingObject_[72]{};

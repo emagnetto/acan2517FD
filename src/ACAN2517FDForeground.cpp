@@ -136,8 +136,10 @@ bool Foreground::initializeStep(uint64_t nowUs) {
         break;
     case 1:
         ok = read32(Con, value);
-        if (ok && ((value >> 21) & 7) == 4)
+        if (ok && ((value >> 21) & 7) == 4) {
+            hardwareDetected_ = true;
             ++stage_;
+        }
         else if (nowUs - modeAt_ >= 10000) {
             fail(ForegroundFault::ModeTimeout, nowUs);
             return true;
@@ -236,6 +238,16 @@ bool Foreground::initializeStep(uint64_t nowUs) {
         break;
     }
     case 11:
+        if (config_.applicationFilters && index_ < 9) {
+            const unsigned filter = 1 + index_ / 3;
+            const uint16_t ids[] = {0x080, 0x100, 0x180};
+            const unsigned field = index_ % 3;
+            ok = field == 0 ? checkedWrite(uint16_t(FilterObj + 8 * filter), ids[filter - 1], 4)
+                 : field == 1 ? checkedWrite(uint16_t(FilterMask + 8 * filter), 0x400007FF, 4)
+                              : checkedWrite(uint16_t(FilterCon + filter), 0x81, 1);
+            ++index_;
+            break;
+        }
         ok = write8(Con + 3, config_.loopback ? 2 : 0);
         modeAt_ = nowUs;
         ++stage_;
