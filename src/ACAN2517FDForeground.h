@@ -52,10 +52,17 @@ constexpr uint32_t dataHz(ForegroundTimingProfile profile) {
            : profile == ForegroundTimingProfile::K500M2 ? 2000000 : 4000000;
 }
 
+struct ForegroundFilter { uint32_t object = 0, mask = 0; };
+
 struct ForegroundConfig {
     uint8_t hardwareRx = 24, hardwareTx = 4;
     uint8_t softwareRx = 32, softwareTx = 4;
     bool loopback = false;
+    // Optional caller-owned immutable configuration, valid through recovery.
+    bool custom = false, listenOnly = false, allowNoBrs = false, xstby = false;
+    uint32_t nominalTiming = 0, dataTiming = 0, delayCompensation = 0;
+    const ForegroundFilter *filters = nullptr;
+    uint8_t filterCount = 0;
     uint16_t requestId = 0x6E0;
     // Opt-in exact application filters. Ordinary/legacy configurations retain
     // their existing single diagnostic filter and initialization sequence.
@@ -114,7 +121,7 @@ class Foreground {
             return stage_ < 3 || nowUs >= retryAt_;
         }
         return state_ == ForegroundState::Ready &&
-               (pending_ != Phase::Idle || interruptLow || txCount_ || healthPhase_ || nowUs - healthAt_ >= 10000);
+               (pending_ != Phase::Idle || interruptLow || txCount_ || diagnosticPending_ || healthPhase_ || nowUs - healthAt_ >= 10000);
     }
     ForegroundUnit lastUnit() const { return lastUnit_; }
     bool inProgress() const { return pending_ != Phase::Idle; }
@@ -150,6 +157,9 @@ class Foreground {
     uint64_t lastTxWaitUs() const {
         return lastTxWaitUs_;
     }
+    void requestDiagnostics() { if (!diagnosticPending_) { diagnosticPending_ = 2; diagnosticValid_ = 0; } }
+    bool diagnosticsReady() const { return diagnosticValid_ == 3; }
+    uint32_t diagnostic(unsigned n) const { return diagnostics_[n & 1]; }
     uint32_t txProgress() const {
         return txProgress_;
     }
@@ -186,6 +196,8 @@ class Foreground {
     void startAttempt(uint64_t nowUs);
     void clearQueues();
     ACAN_FOREGROUND_RAM(driver_add) void add(uint32_t &value, uint32_t amount = 1);
+    uint8_t diagnosticPending_ = 0, diagnosticValid_ = 0;
+    uint32_t diagnostics_[2]{};
     ForegroundIo &io_;
     ForegroundFrame *rx_, *tx_;
     size_t rxCapacity_, txCapacity_;

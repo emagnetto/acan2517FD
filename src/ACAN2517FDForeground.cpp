@@ -76,7 +76,8 @@ bool Foreground::begin(const ForegroundConfig &config, uint64_t nowUs) {
         config.softwareTx > txCapacity_ || !config.hardwareRx || !config.hardwareTx || config.hardwareRx > 32 ||
         config.hardwareTx > 32 || controllerBytes(config.hardwareRx, config.hardwareTx) > 2048 ||
         config.requestId > 0x7FF ||
-        !validTimingProfile(config.timing)) {
+        !validTimingProfile(config.timing) ||
+        (config.custom && (config.filterCount > 32 || (config.filterCount && !config.filters)))) {
         state_ = ForegroundState::Faulted;
         fault_ = ForegroundFault::Configuration;
         return false;
@@ -91,7 +92,7 @@ void Foreground::startAttempt(uint64_t nowUs) {
         ++generation_;
     state_ = ForegroundState::Initializing;
     stage_ = index_ = stuck_ = 0;
-    healthPhase_ = 0;
+    healthPhase_ = 0; diagnosticPending_ = diagnosticValid_ = 0;
     attemptAt_ = modeAt_ = nowUs;
     io_.speed(800000);
 }
@@ -215,9 +216,9 @@ bool Foreground::initializeStep(uint64_t nowUs) {
         const Setting settings[] = {{0xE07, 1, 3},
                                     {Con, 1, 0x60},
                                     {Con + 2, 1, 1},
-                                    {Nbt, 4, fastNominal ? 0x001E0707u : 0x003E0F0Fu},
-                                    {Dbt, 4, dataTiming},
-                                    {Tdc, 4, tdc},
+                                    {Nbt, 4, config_.custom ? config_.nominalTiming : (fastNominal ? 0x001E0707u : 0x003E0F0Fu)},
+                                    {Dbt, 4, config_.custom ? config_.dataTiming : dataTiming},
+                                    {Tdc, 4, config_.custom ? config_.delayCompensation : tdc},
                                     {RxCon + 3, 1, uint32_t(0xE0 | (config_.hardwareRx - 1))},
                                     {RxCon, 1, 9},
                                     {TxCon + 3, 1, uint32_t(0xE0 | (config_.hardwareTx - 1))},
@@ -225,7 +226,7 @@ bool Foreground::initializeStep(uint64_t nowUs) {
                                     {TxCon, 1, 0x90},
                                     {FilterObj, 4, config_.requestId},
                                     {FilterMask, 4, 0x400007FF},
-                                    {FilterCon, 1, 0x81},
+                                    {FilterCon, 1, config_.custom ? 0u : 0x81u},
                                     {CrcFlags + 1, 1, 3},
                                     {Int + 2, 1, 0x0A},
                                     {Int + 3, 1, 0x3F}};
@@ -238,7 +239,20 @@ bool Foreground::initializeStep(uint64_t nowUs) {
         break;
     }
     case 11:
-        if (config_.applicationFilters && index_ < 9) {
+        if (config_.custom && index_ == 0) {
+            ok = checkedWrite(0xE04, config_.xstby ? 0x43 : 3, 1);
+            ++index_; break;
+        }
+        if (config_.custom && index_ <= 3u * config_.filterCount) {
+            const auto &f = config_.filters[(index_ - 1) / 3];
+            const unsigned n = (index_ - 1) / 3, field = (index_ - 1) % 3;
+            ok = field == 0 ? checkedWrite(uint16_t(FilterObj + 8*n), f.object, 4)
+                 : field == 1 ? checkedWrite(uint16_t(FilterMask + 8*n), f.mask, 4)
+                              : checkedWrite(uint16_t(FilterCon + n), 0x81, 1);
+            ++index_;
+            break;
+        }
+        if (!config_.custom && config_.applicationFilters && index_ < 9) {
             const unsigned filter = 1 + index_ / 3;
             const uint16_t ids[] = {0x080, 0x100, 0x180};
             const unsigned field = index_ % 3;
@@ -248,13 +262,13 @@ bool Foreground::initializeStep(uint64_t nowUs) {
             ++index_;
             break;
         }
-        ok = write8(Con + 3, config_.loopback ? 2 : 0);
+        ok = write8(Con + 3, config_.loopback ? 2 : (config_.listenOnly ? 3 : 0));
         modeAt_ = nowUs;
         ++stage_;
         break;
     case 12:
         ok = read32(Con, value);
-        if (ok && ((value >> 21) & 7) == unsigned(config_.loopback ? 2 : 0)) {
+        if (ok && ((value >> 21) & 7) == unsigned(config_.loopback ? 2 : (config_.listenOnly ? 3 : 0))) {
             state_ = ForegroundState::Ready;
             healthAt_ = nowUs;
             if (retry_)
@@ -312,7 +326,9 @@ ForegroundWork Foreground::progressTransfer(uint64_t nowUs) {
         lastUnit_ = ForegroundUnit::RxPublish;
         ForegroundFrame frame{};
         const uint32_t header = le(pendingObject_ + 4);
-        frame.id = le(pendingObject_) & 0x7FF;
+        const uint32_t rawId = le(pendingObject_);
+        frame.id = (header & 16) ? ((rawId >> 11) & 0x3FFFF) | ((rawId & 0x7FF) << 18) : rawId & 0x7FF;
+        frame.reserved = uint16_t((header >> 11) & 31);
         frame.length = lengthFor(uint8_t(header & 15));
         frame.flags = uint8_t(((header >> 7) & 1) | (((header >> 6) & 1) << 1) |
                               (((header >> 4) & 1) << 2) | (((header >> 5) & 1) << 3));
@@ -357,7 +373,7 @@ ForegroundWork Foreground::progressTransfer(uint64_t nowUs) {
         const auto &frame = tx_[txHead_];
         memset(pendingObject_, 0, sizeof(pendingObject_));
         put(pendingObject_, frame.id);
-        put(pendingObject_ + 4, uint32_t(dlcFor(frame.length)) | 0xC0);
+        put(pendingObject_ + 4, uint32_t(dlcFor(frame.length)) | 0x80 | ((frame.flags & 2) ? 0x40 : 0));
         memcpy(pendingObject_ + 8, frame.data, frame.length);
         pending_ = Phase::TxObject;
         return ForegroundWork::Transmit;
@@ -432,6 +448,13 @@ ForegroundWork Foreground::step(uint64_t nowUs, bool interruptLow) {
     // sole consumer/producer; its UA cannot advance until our UINC. Every
     // recovery/begin/fault clears pending_, so it never survives a generation.
     if (pending_ != Phase::Idle) return progressTransfer(nowUs);
+    if (diagnosticPending_) {
+        const unsigned n=2-diagnosticPending_; uint32_t v=0;
+        if (!read32(uint16_t(0x038+4*n),v)) fail(ForegroundFault::Spi,nowUs);
+        else { diagnostics_[n]=v; diagnosticValid_ |= uint8_t(1u<<n); }
+        --diagnosticPending_;
+        return ForegroundWork::Maintenance;
+    }
     uint32_t value = 0;
     if (!interruptLow) stuck_ = 0;
     if (healthPhase_ || nowUs - healthAt_ >= 10000) {
@@ -444,7 +467,7 @@ ForegroundWork Foreground::step(uint64_t nowUs, bool interruptLow) {
             if (value & (1u << 21)) fail(ForegroundFault::BusOff, nowUs);
         } else if (healthPhase_ == 1) {
             if (value == UINT32_MAX) fail(ForegroundFault::Spi, nowUs);
-            else if (((value >> 21) & 7) != unsigned(config_.loopback ? 2 : 0))
+            else if (((value >> 21) & 7) != unsigned(config_.loopback ? 2 : (config_.listenOnly ? 3 : 0)))
                 fail(ForegroundFault::System, nowUs);
         } else if ((value & 0x47F) != 0x460) fail(ForegroundFault::Spi, nowUs);
         healthPhase_ = uint8_t((healthPhase_ + 1) % 3);
@@ -495,7 +518,7 @@ bool Foreground::receive(ForegroundFrame &frame) {
     return true;
 }
 bool Foreground::submit(const ForegroundFrame &frame, uint64_t nowUs) {
-    if (state_ != ForegroundState::Ready || txCount_ == config_.softwareTx || frame.id > 0x7FF || frame.flags != 3 ||
+    if (state_ != ForegroundState::Ready || txCount_ == config_.softwareTx || frame.id > 0x7FF || (frame.flags != 3 && !(config_.allowNoBrs && frame.flags == 1)) || config_.listenOnly ||
         dlcFor(frame.length) < 0) {
         add(counters_.txRejected);
         return false;
